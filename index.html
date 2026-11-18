@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>설문 집계기</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --fg: #1d1d1b; --muted: #66665f; --line: #d9d9d3;
+    --panel: #ffffff; --accent: #2b5fab; --warn: #a2471b; --head: #efefea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a; --fg: #e8e8e4; --muted: #a0a09a; --line: #3a3b3e;
+      --panel: #202124; --accent: #8fb4ee; --warn: #f0a37d; --head: #2a2b2e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  p.lead { margin: 0 0 16px; color: var(--muted); }
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  textarea {
+    width: 100%; min-height: 180px; padding: 10px; resize: vertical;
+    font: 14px/1.4 ui-monospace, SFMono-Regular, Consolas, "D2Coding", monospace;
+    color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    tab-size: 8;
+  }
+  textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .actions { display: flex; gap: 8px; align-items: center; margin: 10px 0 20px; flex-wrap: wrap; }
+  button {
+    font: inherit; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+  }
+  .note { color: var(--muted); font-size: 0.9rem; }
+  #status { margin: 0 0 10px; }
+  #status.warn { color: var(--warn); }
+  .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 8px 12px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: normal; word-break: break-word; }
+  thead th { background: var(--head); font-weight: 600; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td { font-variant-numeric: tabular-nums; }
+  details { margin-top: 24px; color: var(--muted); font-size: 0.92rem; }
+  details ul { padding-left: 20px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>설문 집계기</h1>
+  <p class="lead">엑셀에서 머리글 줄까지 복사해 아래에 붙여넣으세요. 데이터는 이 브라우저 안에서만 계산되며 어디로도 보내거나 저장하지 않습니다.</p>
+
+  <label for="input">응답 데이터</label>
+  <textarea id="input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+    placeholder="응답번호&#9;문항1&#9;문항2&#10;1&#9;5&#9;4&#10;2&#9;3&#9;"></textarea>
+  <div class="actions">
+    <button type="button" id="clear">지우기</button>
+    <span class="note">붙여넣으면 바로 집계됩니다.</span>
+  </div>
+
+  <p id="status" role="status" aria-live="polite"></p>
+  <div class="table-wrap" id="result" hidden>
+    <table>
+      <thead>
+        <tr><th scope="col">문항</th><th scope="col">유효 응답</th><th scope="col">평균</th><th scope="col">빈 응답</th><th scope="col">제외</th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <details>
+    <summary>집계 규칙</summary>
+    <ul>
+      <li>첫 줄은 머리글, 첫 열(응답번호)은 집계하지 않습니다.</li>
+      <li>앞뒤 공백을 지운 값이 1·2·3·4·5 중 하나면 유효, 비었거나 공백만 있으면 빈 응답, 그 밖의 값은 제외입니다.</li>
+      <li>평균은 유효 응답의 합 ÷ 유효 응답 수를 소수 셋째 자리에서 반올림한 값이며, 유효 응답이 없으면 "-"입니다.</li>
+      <li>칸 수가 머리글보다 모자란 줄은 모자란 칸을 빈 응답으로 셉니다. 넘치는 칸은 무시합니다.</li>
+      <li>모든 칸이 빈 줄은 응답으로 세지 않습니다.</li>
+    </ul>
+  </details>
+</main>
+<script id="tally-core">
+// 계산 로직: 화면(DOM)과 무관한 순수 함수만 둔다. tests/ 에서 이 블록만 꺼내 시험한다.
+(function (root) {
+  'use strict';
+
+  var VALID = { '1': 1, '2': 2, '3': 3, '4': 4, '5': 5 };
+
+  // 엑셀 복사 형식(탭 구분, 줄바꿈 \r\n/\n/\r, 필요할 때 큰따옴표로 감싼 칸)을 2차원 배열로 바꾼다.
+  function parseTSV(text) {
+    var rows = [];
+    var row = [];
+    var cell = '';
+    var i = 0;
+    var n = text.length;
+    var atCellStart = true;
+    while (i < n) {
+      var ch = text[i];
+      if (atCellStart && ch === '"') {
+        // 따옴표로 감싼 칸: 닫는 따옴표 뒤가 탭·줄바꿈·끝일 때만 감싼 칸으로 본다.
+        var j = i + 1;
+        var buf = '';
+        var closed = false;
+        while (j < n) {
+          if (text[j] === '"') {
+            if (text[j + 1] === '"') { buf += '"'; j += 2; continue; }
+            var next = text[j + 1];
+            if (next === undefined || next === '\t' || next === '\n' || next === '\r') {
+              closed = true;
+            }
+            break;
+          }
+          buf += text[j];
+          j++;
+        }
+        if (closed) {
+          cell = buf;
+          i = j + 1;
+          atCellStart = false;
+          continue;
+        }
+        // 제대로 닫히지 않았으면 평범한 글자로 취급한다.
+      }
+      atCellStart = false;
+      if (ch === '\t') {
+        row.push(cell); cell = ''; atCellStart = true; i++;
+      } else if (ch === '\r' || ch === '\n') {
+        row.push(cell); rows.push(row);
+        row = []; cell = ''; atCellStart = true;
+        i += (ch === '\r' && text[i + 1] === '\n') ? 2 : 1;
+      } else {
+        cell += ch; i++;
+      }
+    }
+    if (!atCellStart || cell !== '' || row.length > 0) {
+      row.push(cell); rows.push(row);
+    }
+    return rows;
+  }
+
+  // 칸 판정: 'valid' | 'blank' | 'excluded'
+  function classifyCell(raw) {
+    var v = raw == null ? '' : String(raw).trim();
+    if (v === '') return { kind: 'blank' };
+    if (Object.prototype.hasOwnProperty.call(VALID, v)) return { kind: 'valid', value: VALID[v] };
+    return { kind: 'excluded' };
+  }
+
+  // 합 ÷ 수 를 소수 셋째 자리에서 반올림해 둘째 자리까지. 정수 연산으로 오차 없이 계산한다.
+  function formatAverage(sum, count) {
+    if (!count) return '-';
+    var hundredths = Math.floor((200 * sum + count) / (2 * count));
+    var whole = Math.floor(hundredths / 100);
+    var frac = hundredths % 100;
+    return whole + '.' + (frac < 10 ? '0' : '') + frac;
+  }
+
+  function isBlankRow(row) {
+    for (var k = 0; k < row.length; k++) {
+      if (String(row[k]).trim() !== '') return false;
+    }
+    return true;
+  }
+
+  // 붙여넣은 글 전체를 받아 문항별 결과를 돌려준다.
+  // 반환: { ok, message?, responseCount, questions: [{ name, valid, average, blank, excluded, sum }] }
+  function tally(text) {
+    var rows = parseTSV(text == null ? '' : String(text)).filter(function (r) { return !isBlankRow(r); });
+    if (rows.length === 0) {
+      return { ok: false, message: '붙여넣은 내용이 없습니다. 엑셀에서 머리글 줄까지 복사해 붙여넣으세요.', responseCount: 0, questions: [] };
+    }
+    var header = rows[0];
+    if (header.length < 2) {
+      return { ok: false, message: '문항 열이 없습니다. 첫 열(응답번호) 다음에 문항 열이 있어야 합니다.', responseCount: 0, questions: [] };
+    }
+    var questions = [];
+    for (var c = 1; c < header.length; c++) {
+      var name = String(header[c]).trim();
+      questions.push({ name: name === '' ? '(' + (c + 1) + '열)' : name, valid: 0, sum: 0, blank: 0, excluded: 0, average: '-' });
+    }
+    var body = rows.slice(1);
+    for (var r = 0; r < body.length; r++) {
+      var row = body[r];
+      for (var q = 0; q < questions.length; q++) {
+        var col = q + 1;
+        var res = classifyCell(col < row.length ? row[col] : '');
+        var stat = questions[q];
+        if (res.kind === 'valid') { stat.valid++; stat.sum += res.value; }
+        else if (res.kind === 'blank') stat.blank++;
+        else stat.excluded++;
+      }
+    }
+    for (var s = 0; s < questions.length; s++) {
+      questions[s].average = formatAverage(questions[s].sum, questions[s].valid);
+    }
+    return { ok: true, responseCount: body.length, questions: questions };
+  }
+
+  root.SurveyTally = { parseTSV: parseTSV, classifyCell: classifyCell, formatAverage: formatAverage, tally: tally };
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+</script>
+<script>
+// 화면 연결: 입력을 읽어 SurveyTally.tally 결과를 표로 그린다. 사용자 값은 textContent 로만 넣는다.
+(function () {
+  'use strict';
+  var input = document.getElementById('input');
+  var clearBtn = document.getElementById('clear');
+  var statusEl = document.getElementById('status');
+  var resultEl = document.getElementById('result');
+  var rowsEl = document.getElementById('rows');
+
+  function cell(tag, text) {
+    var el = document.createElement(tag);
+    el.textContent = String(text);
+    return el;
+  }
+
+  function render() {
+    var text = input.value;
+    rowsEl.textContent = '';
+    if (text.trim() === '') {
+      statusEl.textContent = '';
+      statusEl.className = '';
+      resultEl.hidden = true;
+      return;
+    }
+    var r = window.SurveyTally.tally(text);
+    if (!r.ok) {
+      statusEl.textContent = r.message;
+      statusEl.className = 'warn';
+      resultEl.hidden = true;
+      return;
+    }
+    statusEl.className = '';
+    statusEl.textContent = '응답 ' + r.responseCount + '줄 · 문항 ' + r.questions.length + '개';
+    var frag = document.createDocumentFragment();
+    r.questions.forEach(function (q) {
+      var tr = document.createElement('tr');
+      var th = cell('th', q.name);
+      th.scope = 'row';
+      th.style.fontWeight = 'normal';
+      tr.appendChild(th);
+      tr.appendChild(cell('td', q.valid));
+      tr.appendChild(cell('td', q.average));
+      tr.appendChild(cell('td', q.blank));
+      tr.appendChild(cell('td', q.excluded));
+      frag.appendChild(tr);
+    });
+    rowsEl.appendChild(frag);
+    resultEl.hidden = false;
+  }
+
+  input.addEventListener('input', render);
+  clearBtn.addEventListener('click', function () {
+    input.value = '';
+    render();
+    input.focus();
+  });
+  render();
+})();
+</script>
+</body>
+</html>
