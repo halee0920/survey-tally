@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>10×10 오목</title>
+<style>
+  :root {
+    --bg: #f4f1ea; --fg: #23201b; --muted: #6b655a; --panel: #ffffff; --line-ui: #d8d2c4;
+    --wood: #dcb36a; --wood-edge: #b88a3e; --grid: #4a3618; --accent: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #18171a; --fg: #ecebe6; --muted: #a8a49b; --panel: #232226; --line-ui: #3b3a3f; --accent: #ff7a6b; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  }
+  main { max-width: 560px; margin: 0 auto; padding: 20px 16px 40px; }
+  h1 { font-size: 1.5rem; margin: 0 0 12px; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  #status { font-weight: 600; display: flex; align-items: center; gap: 8px; min-height: 28px; }
+  #status.win { color: var(--accent); }
+  .dot { width: 18px; height: 18px; border-radius: 50%; display: inline-block; flex: none; }
+  .dot.black { background: radial-gradient(circle at 35% 30%, #666, #111 60%); }
+  .dot.white { background: radial-gradient(circle at 35% 30%, #fff, #d8d8d8 70%); box-shadow: inset 0 0 0 1px #999; }
+  .buttons { display: flex; gap: 8px; }
+  button.ctl {
+    font: inherit; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--line-ui); background: var(--panel); color: var(--fg);
+  }
+  button.ctl:disabled { opacity: 0.45; cursor: default; }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
+
+  .board {
+    --n: 10;
+    width: min(100%, 520px); aspect-ratio: 1; margin: 0 auto;
+    padding: calc(100% / var(--n) / 2.4);
+    background: var(--wood); border-radius: 6px;
+    box-shadow: inset 0 0 0 2px var(--wood-edge), 0 6px 18px rgba(0,0,0,.18);
+  }
+  .grid { display: grid; grid-template-columns: repeat(var(--n), 1fr); grid-template-rows: repeat(var(--n), 1fr); width: 100%; height: 100%; }
+  .pt {
+    position: relative; border: 0; padding: 0; margin: 0; background: none; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .pt:disabled { cursor: default; }
+  /* 교차점 선: 가장자리에서는 반쪽만 그린다 */
+  .pt::before, .pt::after { content: ""; position: absolute; background: var(--grid); pointer-events: none; }
+  .pt::before { top: 50%; left: 0; right: 0; height: 1px; }
+  .pt::after { left: 50%; top: 0; bottom: 0; width: 1px; }
+  .pt.l::before { left: 50%; } .pt.r::before { right: 50%; }
+  .pt.t::after { top: 50%; } .pt.b::after { bottom: 50%; }
+  .stone {
+    position: absolute; inset: 7%; border-radius: 50%; z-index: 1; pointer-events: none;
+  }
+  .stone.black { background: radial-gradient(circle at 35% 30%, #6a6a6a, #111 62%); box-shadow: 1px 2px 3px rgba(0,0,0,.45); }
+  .stone.white { background: radial-gradient(circle at 35% 30%, #fff, #d6d6d6 72%); box-shadow: 1px 2px 3px rgba(0,0,0,.35); }
+  .pt:not(:disabled):hover .ghost { position: absolute; inset: 7%; border-radius: 50%; z-index: 1; opacity: .4; }
+  .ghost.black { background: #111; } .ghost.white { background: #fff; }
+  .stone.last::after {
+    content: ""; position: absolute; inset: 36%; border-radius: 50%; background: var(--accent);
+  }
+  .stone.win { box-shadow: 0 0 0 3px var(--accent), 1px 2px 3px rgba(0,0,0,.4); }
+  .help { margin-top: 16px; color: var(--muted); font-size: 0.92rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>10×10 오목</h1>
+  <div class="bar">
+    <div id="status" role="status" aria-live="polite"></div>
+    <div class="buttons">
+      <button type="button" class="ctl" id="undo">무르기</button>
+      <button type="button" class="ctl" id="reset">새 게임</button>
+    </div>
+  </div>
+  <div class="board"><div class="grid" id="grid" role="grid" aria-label="오목판 10줄 10칸"></div></div>
+  <p class="help">두 사람이 한 화면에서 번갈아 둡니다. 흑이 먼저 두고, 가로·세로·대각선으로 다섯 개 이상 이으면 이깁니다.</p>
+</main>
+
+<script id="gomoku-core">
+// 게임 규칙: 화면(DOM)과 무관한 순수 로직. tests/ 에서 이 블록만 꺼내 시험한다.
+(function (root) {
+  'use strict';
+
+  var EMPTY = 0, BLACK = 1, WHITE = 2;
+  var DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
+
+  function createGame(size) {
+    size = size || 10;
+    var board, turn, winner, winLine, moves;
+
+    function reset() {
+      board = [];
+      for (var r = 0; r < size; r++) {
+        var row = [];
+        for (var c = 0; c < size; c++) row.push(EMPTY);
+        board.push(row);
+      }
+      turn = BLACK; winner = EMPTY; winLine = []; moves = [];
+    }
+
+    function inside(r, c) { return r >= 0 && r < size && c >= 0 && c < size; }
+
+    // (r, c)에 놓인 돌을 지나는 다섯 개 이상 줄을 찾는다. 없으면 빈 배열.
+    function findLine(r, c) {
+      var color = board[r][c];
+      for (var d = 0; d < DIRS.length; d++) {
+        var dr = DIRS[d][0], dc = DIRS[d][1];
+        var line = [[r, c]];
+        for (var s = -1; s <= 1; s += 2) {
+          var rr = r + dr * s, cc = c + dc * s;
+          while (inside(rr, cc) && board[rr][cc] === color) {
+            line.push([rr, cc]);
+            rr += dr * s; cc += dc * s;
+          }
+        }
+        if (line.length >= 5) {
+          line.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+          return line;
+        }
+      }
+      return [];
+    }
+
+    // 돌을 둔다. 둘 수 없으면 false.
+    function play(r, c) {
+      if (winner !== EMPTY || isDraw() || !inside(r, c) || board[r][c] !== EMPTY) return false;
+      board[r][c] = turn;
+      moves.push([r, c]);
+      var line = findLine(r, c);
+      if (line.length) { winner = turn; winLine = line; }
+      else turn = turn === BLACK ? WHITE : BLACK;
+      return true;
+    }
+
+    // 마지막 수를 무른다. 무를 수가 없으면 false.
+    function undo() {
+      if (!moves.length) return false;
+      var m = moves.pop();
+      turn = board[m[0]][m[1]];
+      board[m[0]][m[1]] = EMPTY;
+      winner = EMPTY; winLine = [];
+      return true;
+    }
+
+    function isDraw() { return winner === EMPTY && moves.length === size * size; }
+
+    function state() {
+      return {
+        size: size,
+        board: board.map(function (row) { return row.slice(); }),
+        turn: turn,
+        winner: winner,
+        winLine: winLine.map(function (p) { return p.slice(); }),
+        lastMove: moves.length ? moves[moves.length - 1].slice() : null,
+        moveCount: moves.length,
+        draw: isDraw()
+      };
+    }
+
+    reset();
+    return { play: play, undo: undo, reset: reset, state: state };
+  }
+
+  root.Gomoku = { EMPTY: EMPTY, BLACK: BLACK, WHITE: WHITE, createGame: createGame };
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+</script>
+
+<script>
+// 화면 연결
+(function () {
+  'use strict';
+  var G = window.Gomoku;
+  var SIZE = 10;
+  var game = G.createGame(SIZE);
+  var gridEl = document.getElementById('grid');
+  var statusEl = document.getElementById('status');
+  var undoBtn = document.getElementById('undo');
+  var resetBtn = document.getElementById('reset');
+  var NAME = {}; NAME[G.BLACK] = '흑'; NAME[G.WHITE] = '백';
+  var CLS = {}; CLS[G.BLACK] = 'black'; CLS[G.WHITE] = 'white';
+  var points = [];
+
+  for (var r = 0; r < SIZE; r++) {
+    for (var c = 0; c < SIZE; c++) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pt' + (r === 0 ? ' t' : '') + (r === SIZE - 1 ? ' b' : '') + (c === 0 ? ' l' : '') + (c === SIZE - 1 ? ' r' : '');
+      b.dataset.r = r; b.dataset.c = c;
+      gridEl.appendChild(b);
+      points.push(b);
+    }
+  }
+
+  gridEl.addEventListener('click', function (e) {
+    var b = e.target.closest('.pt');
+    if (!b) return;
+    if (game.play(Number(b.dataset.r), Number(b.dataset.c))) render();
+  });
+  undoBtn.addEventListener('click', function () { if (game.undo()) render(); });
+  resetBtn.addEventListener('click', function () { game.reset(); render(); });
+
+  function render() {
+    var s = game.state();
+    var over = s.winner !== G.EMPTY || s.draw;
+    var wins = {};
+    s.winLine.forEach(function (p) { wins[p[0] + ',' + p[1]] = true; });
+
+    points.forEach(function (b) {
+      var r = Number(b.dataset.r), c = Number(b.dataset.c);
+      var v = s.board[r][c];
+      b.textContent = '';
+      var label = (r + 1) + '행 ' + (c + 1) + '열';
+      if (v !== G.EMPTY) {
+        var st = document.createElement('span');
+        st.className = 'stone ' + CLS[v];
+        if (s.lastMove && s.lastMove[0] === r && s.lastMove[1] === c) st.className += ' last';
+        if (wins[r + ',' + c]) st.className += ' win';
+        b.appendChild(st);
+        b.disabled = true;
+        b.setAttribute('aria-label', label + ' ' + NAME[v]);
+      } else {
+        b.disabled = over;
+        if (!over) {
+          var gh = document.createElement('span');
+          gh.className = 'ghost ' + CLS[s.turn];
+          b.appendChild(gh);
+        }
+        b.setAttribute('aria-label', label + ' 빈칸');
+      }
+    });
+
+    statusEl.textContent = '';
+    statusEl.className = '';
+    var dot = document.createElement('span');
+    var text;
+    if (s.winner !== G.EMPTY) {
+      dot.className = 'dot ' + CLS[s.winner];
+      text = NAME[s.winner] + ' 승리!';
+      statusEl.className = 'win';
+    } else if (s.draw) {
+      dot = null;
+      text = '무승부';
+    } else {
+      dot.className = 'dot ' + CLS[s.turn];
+      text = NAME[s.turn] + ' 차례';
+    }
+    if (dot) statusEl.appendChild(dot);
+    statusEl.appendChild(document.createTextNode(text));
+    undoBtn.disabled = s.moveCount === 0;
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>
