@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>설문 집계기</title>
+</head>
+<body>
+<script id="tally-core">
+// 계산 로직: 화면(DOM)과 무관한 순수 함수만 둔다. tests/ 에서 이 블록만 꺼내 시험한다.
+(function (root) {
+  'use strict';
+
+  var VALID = { '1': 1, '2': 2, '3': 3, '4': 4, '5': 5 };
+
+  // 엑셀 복사 형식(탭 구분, 줄바꿈 \r\n/\n/\r, 필요할 때 큰따옴표로 감싼 칸)을 2차원 배열로 바꾼다.
+  function parseTSV(text) {
+    var rows = [];
+    var row = [];
+    var cell = '';
+    var i = 0;
+    var n = text.length;
+    var atCellStart = true;
+    while (i < n) {
+      var ch = text[i];
+      if (atCellStart && ch === '"') {
+        // 따옴표로 감싼 칸: 닫는 따옴표 뒤가 탭·줄바꿈·끝일 때만 감싼 칸으로 본다.
+        var j = i + 1;
+        var buf = '';
+        var closed = false;
+        while (j < n) {
+          if (text[j] === '"') {
+            if (text[j + 1] === '"') { buf += '"'; j += 2; continue; }
+            var next = text[j + 1];
+            if (next === undefined || next === '\t' || next === '\n' || next === '\r') {
+              closed = true;
+            }
+            break;
+          }
+          buf += text[j];
+          j++;
+        }
+        if (closed) {
+          cell = buf;
+          i = j + 1;
+          atCellStart = false;
+          continue;
+        }
+        // 제대로 닫히지 않았으면 평범한 글자로 취급한다.
+      }
+      atCellStart = false;
+      if (ch === '\t') {
+        row.push(cell); cell = ''; atCellStart = true; i++;
+      } else if (ch === '\r' || ch === '\n') {
+        row.push(cell); rows.push(row);
+        row = []; cell = ''; atCellStart = true;
+        i += (ch === '\r' && text[i + 1] === '\n') ? 2 : 1;
+      } else {
+        cell += ch; i++;
+      }
+    }
+    if (!atCellStart || cell !== '' || row.length > 0) {
+      row.push(cell); rows.push(row);
+    }
+    return rows;
+  }
+
+  // 칸 판정: 'valid' | 'blank' | 'excluded'
+  function classifyCell(raw) {
+    var v = raw == null ? '' : String(raw).trim();
+    if (v === '') return { kind: 'blank' };
+    if (Object.prototype.hasOwnProperty.call(VALID, v)) return { kind: 'valid', value: VALID[v] };
+    return { kind: 'excluded' };
+  }
+
+  // 합 ÷ 수 를 소수 셋째 자리에서 반올림해 둘째 자리까지. 정수 연산으로 오차 없이 계산한다.
+  function formatAverage(sum, count) {
+    if (!count) return '-';
+    var hundredths = Math.floor((200 * sum + count) / (2 * count));
+    var whole = Math.floor(hundredths / 100);
+    var frac = hundredths % 100;
+    return whole + '.' + (frac < 10 ? '0' : '') + frac;
+  }
+
+  function isBlankRow(row) {
+    for (var k = 0; k < row.length; k++) {
+      if (String(row[k]).trim() !== '') return false;
+    }
+    return true;
+  }
+
+  // 붙여넣은 글 전체를 받아 문항별 결과를 돌려준다.
+  // 반환: { ok, message?, responseCount, questions: [{ name, valid, average, blank, excluded, sum }] }
+  function tally(text) {
+    var rows = parseTSV(text == null ? '' : String(text)).filter(function (r) { return !isBlankRow(r); });
+    if (rows.length === 0) {
+      return { ok: false, message: '붙여넣은 내용이 없습니다. 엑셀에서 머리글 줄까지 복사해 붙여넣으세요.', responseCount: 0, questions: [] };
+    }
+    var header = rows[0];
+    if (header.length < 2) {
+      return { ok: false, message: '문항 열이 없습니다. 첫 열(응답번호) 다음에 문항 열이 있어야 합니다.', responseCount: 0, questions: [] };
+    }
+    var questions = [];
+    for (var c = 1; c < header.length; c++) {
+      var name = String(header[c]).trim();
+      questions.push({ name: name === '' ? '(' + (c + 1) + '열)' : name, valid: 0, sum: 0, blank: 0, excluded: 0, average: '-' });
+    }
+    var body = rows.slice(1);
+    for (var r = 0; r < body.length; r++) {
+      var row = body[r];
+      for (var q = 0; q < questions.length; q++) {
+        var col = q + 1;
+        var res = classifyCell(col < row.length ? row[col] : '');
+        var stat = questions[q];
+        if (res.kind === 'valid') { stat.valid++; stat.sum += res.value; }
+        else if (res.kind === 'blank') stat.blank++;
+        else stat.excluded++;
+      }
+    }
+    for (var s = 0; s < questions.length; s++) {
+      questions[s].average = formatAverage(questions[s].sum, questions[s].valid);
+    }
+    return { ok: true, responseCount: body.length, questions: questions };
+  }
+
+  root.SurveyTally = { parseTSV: parseTSV, classifyCell: classifyCell, formatAverage: formatAverage, tally: tally };
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+</script>
+</body>
+</html>
